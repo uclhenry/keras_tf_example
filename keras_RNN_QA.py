@@ -41,6 +41,24 @@ def downsample_huabei():
     number_positive, number_negative = len(training_data_positive), len(training_data_negative)
     training_data = pd.concat([training_data_negative.sample(number_positive), training_data_positive], axis=0)
     return training_data
+def upsample_huabei():
+    training_data1 = get_huabei('atec_nlp_sim_train.csv')
+    training_data2 = get_huabei('atec_nlp_sim_train_add.csv')
+    training_data = pd.concat([training_data1, training_data2], axis=0)
+    training_data_positive = training_data[training_data['label'] == 1]
+    training_data_negative = training_data[training_data['label'] == 0]
+    number_positive, number_negative = len(training_data_positive), len(training_data_negative)
+    sizes = []
+    while number_negative > 0:
+        if number_negative > number_positive:
+            sizes.append(number_positive)
+        else:
+            sizes.append(number_negative)
+        number_negative -= number_positive
+    #print(sizes)
+
+    samples = [training_data_positive.sample(size) for size in sizes]
+    return  pd.concat([training_data_negative]+samples,axis=0)
 
 DATA_DIR = "../data"
 
@@ -51,18 +69,8 @@ num_recs = 0
 word_freqs = collections.Counter()
 #training_data = convert_dialogue_to_pair(max_pair)
 
-# sizes = []
-# while number_negative > 0:
-#     if number_negative > number_positive:
-#         sizes.append(number_positive)
-#     else:
-#         sizes.append(number_negative)
-#     number_negative -= number_positive
-# print(sizes)
-#
-# samples = [training_data_positive.sample(size) for size in sizes]
-# training_data  = pd.concat([training_data_negative]+samples,axis=0)
-training_data = downsample_huabei()
+
+training_data = upsample_huabei()
 count_label = pd.value_counts(training_data['label'].values)
 print(count_label)
 #print(count_label['0'],count_label['1'])
