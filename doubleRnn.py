@@ -1,3 +1,6 @@
+# 从两个level 学习对话序列关系
+# word level
+# turn level
 from keras.layers.wrappers import Bidirectional
 from keras.models import Model
 import keras.backend as K
