@@ -114,7 +114,7 @@ class ActionModel():
                                                         random_state=42)
         ytrain = self.get_multi_labels(ytrain)
         ytest = self.get_multi_labels(ytest)
-        self.model.fit(Xtrain, ytrain, batch_size=self.batch_size,
+        self.model.fit(Xtrain, ytrain, batch_size=self.batch_size,verbose=2,
                   epochs=self.num_epochs,
                   validation_data=(Xtest, ytest))
 
@@ -636,8 +636,10 @@ class MultiClassModel(ActionModel):
         self.index2word = None
         self.word2index = None
         self.HIDDEN_LAYER_SIZE = 300
+        self.MAX_FEATURES = 1300
+        # keep it the last
         self.set_index_dict()
-        self.MAX_FEATURES  = 1000
+
 
 
 
@@ -718,16 +720,9 @@ class MultiClassModel(ActionModel):
         self.tokenizer = tokenizer
         return tokenizer
 
-    def build_pretrain_model(self):
-
-        self.build_tokenizer()
-        #sequences = self.tokenizer.texts_to_sequences(texts)
-
-        # 字典，key = sequences of text, values = labels_id
-        #word_index = self.tokenizer.word_index
-        word_index = self.word2index
+    def get_embed_matrix(self,word_index,EMBEDDING_DIM):
         GLOVE_DIR = 'text_data/glove.6B'
-        EMBEDDING_DIM = 100
+
         embedding_matrix = np.zeros((len(word_index) + 1, EMBEDDING_DIM))
         embedding_index = self.get_glove_dict()
         for word, i in word_index.items():
@@ -735,7 +730,14 @@ class MultiClassModel(ActionModel):
             if embedding_vector is not None:
                 # words not found in embedding index will be all-zeros.
                 embedding_matrix[i] = embedding_vector
-
+        return embedding_matrix
+    def build_pretrain_model(self):
+        self.build_tokenizer()
+        #sequences = self.tokenizer.texts_to_sequences(texts
+        #word_index = self.tokenizer.word_index
+        word_index = self.word2index
+        EMBEDDING_DIM = 100
+        embedding_matrix = self.get_embed_matrix(word_index,EMBEDDING_DIM)
         embedding_layer = Embedding(len(word_index) + 1,
                                     EMBEDDING_DIM,
                                     weights=[embedding_matrix],
@@ -744,9 +746,11 @@ class MultiClassModel(ActionModel):
 
         x_utterance_concat = Input(shape =(self.MAX_SENTENCE_LENGTH * self.turn_number,), name="concat_utter")
         embedded_sequences = embedding_layer(x_utterance_concat)
-        encoded_utter = self.encoder(x_utterance_concat, self.HIDDEN_LAYER_SIZE, 0.1, False)
-        print("building utterance model...")
-        class_layer = Dense(len(self.all_action) ,activation='softmax')(encoded_utter)
+        inputs_drop = SpatialDropout1D(0.2)(embedded_sequences)
+        encoded_Q = Bidirectional(
+            LSTM(self.hidden_size, dropout=0.1, recurrent_dropout=0.1, name='RNN',
+                 return_sequences=False))(inputs_drop)
+        class_layer = Dense(len(self.all_action) ,activation='softmax')(encoded_Q)
         model = Model(inputs = x_utterance_concat, outputs = class_layer)
         model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
         self.model = model
@@ -807,9 +811,7 @@ class MultiClassModel(ActionModel):
         X,Y,history_utterances = self.load_data_from_pk()
         self.build_counter(history_utterances)
         #self.build_utterance_model2()
-        #self.get_utterance(history_utterances)
-        print('len word2index')
-        print(len(self.word2index))
+        print('len word2index',len(self.word2index))
         self.build_pretrain_model()
         #self.train(X,history_utterances,Y)
         #self.tokenizer
@@ -818,7 +820,7 @@ class MultiClassModel(ActionModel):
 
     def set_index_dict(self):
         X, Y, history = self.load_data_from_pk()
-        MAX_SENTENCE_LENGTH, MAX_FEATURES, embedding_size = 40, 1000, 200
+        MAX_SENTENCE_LENGTH, MAX_FEATURES, embedding_size = 40, self.MAX_FEATURES, 200
         turn_num = 4
         word_freqs = collections.Counter()
         maxlen = 0
@@ -945,7 +947,7 @@ class MultiClassModel(ActionModel):
         Xtrain, Xtest,his_train,his_test ,ytrain, ytest = train_test_split(X,his_data_array, Y, test_size=0.1,
                                                         random_state=42)
 
-        self.model.fit([Xtrain,his_train], ytrain, batch_size=self.batch_size,
+        self.model.fit([Xtrain,his_train], ytrain, batch_size=self.batch_size,verbose=2,
                   epochs=self.num_epochs,
                   validation_data=([Xtest,his_test], ytest))
         self.evaluate([Xtest,his_test],ytest)
@@ -959,7 +961,7 @@ class MultiClassModel(ActionModel):
                                                         random_state=42)
         self.model.fit(his_train, ytrain, batch_size=self.batch_size,
                   epochs=self.num_epochs,
-                  validation_data=(his_test, ytest))
+                  validation_data=(his_test, ytest),verbose=2)
         self.evaluate(his_test,ytest)
 
     # def train(self,X,Y):
@@ -974,7 +976,7 @@ class MultiClassModel(ActionModel):
     #     # ytrain = self.get_multi_labels(ytrain)
     #     # ytest = self.get_multi_labels(ytest)
     #     self.model.fit(Xtrain, ytrain, batch_size=self.batch_size,
-    #               epochs=self.num_epochs,
+    #               epochs=self.num_epochs,verbose=2,
     #               validation_data=(Xtest, ytest))
     #     y_hat = self.model.predict_on_batch(Xtest)
     #     index_y_hat =[np.argmax(y_row) for y_row in y_hat]
@@ -1144,27 +1146,53 @@ class TfRnnModel(MultiClassModel):
         for i in range(len(Y)):
             data.append([Y[i],his_data_array[i]])
 
+        use_pretrain = True
+        word_index = self.word2index
+        EMBEDDING_DIM = 100
+
+
+        #x_utterance_concat = Input(shape =(self.MAX_SENTENCE_LENGTH * self.turn_number,), name="concat_utter")
+
+        #### old impliment
         x_utterance_concat = Input(shape=(self.turn_number * self.MAX_SENTENCE_LENGTH, ), name="concat_utter")
-        x_embed = Embedding(self.vocab_size, self.embedding_size, input_length=self.MAX_SENTENCE_LENGTH * self.turn_number)(x_utterance_concat)
+        if use_pretrain:
+            embedding_matrix = self.get_embed_matrix(word_index, EMBEDDING_DIM)
+            pretrain_embedding = Embedding(len(word_index) + 1,
+                                        EMBEDDING_DIM,
+                                        weights=[embedding_matrix],
+                                        input_length=self.MAX_SENTENCE_LENGTH * self.turn_number,
+                                        trainable=False)
+            x_embed = pretrain_embedding(x_utterance_concat)
+
+        else:
+            x_embed = Embedding(self.vocab_size, self.embedding_size,
+                                input_length=self.MAX_SENTENCE_LENGTH * self.turn_number)(x_utterance_concat)
         inputs_drop = SpatialDropout1D(0.2)(x_embed)
-        rnn1 = Bidirectional(
+        word_level_rnn = Bidirectional(
             LSTM(self.hidden_size, dropout=0.1, recurrent_dropout=0.1, name='RNN',
                  return_sequences=True))(inputs_drop)
-        rnn1_shape = Reshape((self.turn_number, self.MAX_SENTENCE_LENGTH, self.hidden_size * 2))(rnn1)
+        rnn1_shape = Reshape((self.turn_number, self.MAX_SENTENCE_LENGTH, self.hidden_size * 2))(word_level_rnn)
         swap = Permute((1, 3, 2))(rnn1_shape)
         average = Lambda(self.reduce_mean)(swap)
-        rnn2 = Bidirectional(
+        sentence_level_rnn = Bidirectional(
             LSTM(self.hidden_size, dropout=0.1, recurrent_dropout=0.1, name='RNN',
                  return_sequences=False))(average)
-        class_layer = Dense(n_class, activation='softmax')(rnn2)
+        class_layer = Dense(n_class, activation='softmax')(sentence_level_rnn)
         model = Model(inputs=x_utterance_concat, outputs=class_layer)
         model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
-        model.fit(his_data_array, Y, batch_size=30,
-                  epochs=10,
-                  validation_data=(his_data_array[-50:], Y[-50:]))
-
+        # model.fit(his_data_array[:-100], Y[:-100], batch_size=80,
+        #           epochs=7,
+        #           validation_data=(his_data_array[-100:], Y[-100:]))
+        his_train,his_test ,ytrain, ytest = train_test_split(his_data_array, Y, test_size=0.1,
+                                                        random_state=42)
+        self.model = model
+        self.model.fit(his_train, ytrain, batch_size=self.batch_size,
+                  epochs=self.num_epochs,
+                  validation_data=(his_test, ytest),verbose=2)
+        self.evaluate(his_test,ytest)
 
 # m = MultiClassModel()
+# m.load_data_and_train()
 # # m.load_data_from_pk()
 # # # #m.set_index_dict()
 # # #m.load_data_and_evaluate()
