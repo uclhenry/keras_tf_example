@@ -1,5 +1,6 @@
 from keras.layers.wrappers import Bidirectional
 from keras.models import Model
+
 import tensorflow as tf
 import keras.backend as K
 from keras.models import load_model
@@ -39,6 +40,10 @@ class ActionModel():
         self.loss_d = {k: 'binary_crossentropy' for k in self.all_action}
         self.lossweight_d = {k: 1. for k in self.all_action}
         self.set_slot()
+
+    def set_epoch(self,n):
+        self.num_epoch = n
+
 
     def default_config(self):
         self.model = None
@@ -616,10 +621,10 @@ class MultiClassModel(ActionModel):
 
     def default_config(self):
         self.model = None
-        self.hidden_size = 300
+        self.hidden_size = 250
         self.input_shape = (59,)
         self.batch_size = 100
-        self.num_epochs = 12
+        self.num_epochs = 50
         self.X_feature_number = 9
         self.model_path = "D://model//policy_learner_kvret_new.h5"
         navigate = ['action_report_address', 'action_affirm_want_direction', 'action_report_traffic',
@@ -1136,7 +1141,8 @@ class TfRnnModel(MultiClassModel):
                         y: batch_ys2,
                     }))
                 step += 1
-    def test_keras(self):
+
+    def test_double_rnn_keras(self):
         n_class  = len(self.all_action)
         X, Y, history_utterances = self.load_data_from_pk()
         self.build_counter(history_utterances)
@@ -1145,23 +1151,86 @@ class TfRnnModel(MultiClassModel):
         data = []
         for i in range(len(Y)):
             data.append([Y[i],his_data_array[i]])
-
         use_pretrain = True
         word_index = self.word2index
         EMBEDDING_DIM = 100
-
-
-        #x_utterance_concat = Input(shape =(self.MAX_SENTENCE_LENGTH * self.turn_number,), name="concat_utter")
-
-        #### old impliment
         x_utterance_concat = Input(shape=(self.turn_number * self.MAX_SENTENCE_LENGTH, ), name="concat_utter")
+        x_utterance_concat2 = Reshape((self.turn_number,self.MAX_SENTENCE_LENGTH, ),name='to_turn_length')(x_utterance_concat)
         if use_pretrain:
             embedding_matrix = self.get_embed_matrix(word_index, EMBEDDING_DIM)
             pretrain_embedding = Embedding(len(word_index) + 1,
                                         EMBEDDING_DIM,
                                         weights=[embedding_matrix],
-                                        input_length=self.MAX_SENTENCE_LENGTH * self.turn_number,
+                                        input_length=( self.turn_number,self.MAX_SENTENCE_LENGTH ),
                                         trainable=False)
+            x_embed = pretrain_embedding(x_utterance_concat2)
+
+        else:
+            x_embed = Embedding(self.vocab_size, self.embedding_size,
+                                input_length=(self.MAX_SENTENCE_LENGTH , self.turn_number))(x_utterance_concat)
+        # x embed ? 4 40 100
+        def slice(x, turn):
+            """ Define a tensor slice function
+            """
+            return x[:,turn,:, :]
+
+        turn = dict()
+        turn[0] = Lambda(slice, arguments={'turn': 0})(x_embed)
+        turn[1] = Lambda(slice, arguments={'turn': 1})(x_embed)
+        turn[2] = Lambda(slice, arguments={'turn': 2})(x_embed)
+        turn[3] = Lambda(slice, arguments={'turn': 3})(x_embed)
+        word_level_rnns = dict()
+        for i in range(4):
+            x_embed = turn[i]
+            x_embed = Reshape(( self.MAX_SENTENCE_LENGTH,100))(x_embed)
+            inputs_drop = SpatialDropout1D(0.2)(x_embed)
+
+            word_level_rnn = Bidirectional(
+                LSTM(self.hidden_size, dropout=0.1, recurrent_dropout=0.1, name='RNN',
+                     return_sequences=False))(inputs_drop)
+            word_level_rnns[i] = word_level_rnn
+        for i in range(4):
+            word_level_rnns[i] = Reshape((1,2* self.hidden_size),name = 'add_dimension'+str(i))(word_level_rnns[i])
+        turn_combined = Lambda(K.concatenate, arguments={'axis': 1})([word_level_rnns[0],word_level_rnns[1],word_level_rnns[2],word_level_rnns[3]])
+        sentence_level_rnn = Bidirectional(
+            LSTM(self.hidden_size, dropout=0.1, recurrent_dropout=0.1, name='RNN',
+                 return_sequences=False))(turn_combined)
+        class_layer = Dense(n_class, activation='softmax')(sentence_level_rnn)
+        model = Model(inputs=x_utterance_concat, outputs=class_layer)
+        model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+        his_train,his_test ,ytrain, ytest = train_test_split(his_data_array, Y, test_size=0.1,
+                                                        random_state=42)
+        self.model = model
+        self.model.fit(his_train, ytrain, batch_size=self.batch_size,
+                  epochs=self.num_epochs,
+                  validation_data=(his_test, ytest),verbose=2)
+        self.evaluate(his_test,ytest)
+
+    def test_keras(self):
+        n_class = len(self.all_action)
+        X, Y, history_utterances = self.load_data_from_pk()
+        self.build_counter(history_utterances)
+        Y = np.array(Y)
+        his_data_array = self.get_utterance(history_utterances)
+        data = []
+        for i in range(len(Y)):
+            data.append([Y[i], his_data_array[i]])
+
+        use_pretrain = True
+        word_index = self.word2index
+        EMBEDDING_DIM = 100
+
+        # x_utterance_concat = Input(shape =(self.MAX_SENTENCE_LENGTH * self.turn_number,), name="concat_utter")
+
+        #### old impliment
+        x_utterance_concat = Input(shape=(self.turn_number * self.MAX_SENTENCE_LENGTH,), name="concat_utter")
+        if use_pretrain:
+            embedding_matrix = self.get_embed_matrix(word_index, EMBEDDING_DIM)
+            pretrain_embedding = Embedding(len(word_index) + 1,
+                                           EMBEDDING_DIM,
+                                           weights=[embedding_matrix],
+                                           input_length=self.MAX_SENTENCE_LENGTH * self.turn_number,
+                                           trainable=False)
             x_embed = pretrain_embedding(x_utterance_concat)
 
         else:
@@ -1183,14 +1252,13 @@ class TfRnnModel(MultiClassModel):
         # model.fit(his_data_array[:-100], Y[:-100], batch_size=80,
         #           epochs=7,
         #           validation_data=(his_data_array[-100:], Y[-100:]))
-        his_train,his_test ,ytrain, ytest = train_test_split(his_data_array, Y, test_size=0.1,
-                                                        random_state=42)
+        his_train, his_test, ytrain, ytest = train_test_split(his_data_array, Y, test_size=0.1,
+                                                              random_state=42)
         self.model = model
         self.model.fit(his_train, ytrain, batch_size=self.batch_size,
-                  epochs=self.num_epochs,
-                  validation_data=(his_test, ytest),verbose=2)
-        self.evaluate(his_test,ytest)
-
+                       epochs=self.num_epochs,
+                       validation_data=(his_test, ytest), verbose=2)
+        self.evaluate(his_test, ytest)
 # m = MultiClassModel()
 # m.load_data_and_train()
 # # m.load_data_from_pk()
@@ -1202,4 +1270,5 @@ class TfRnnModel(MultiClassModel):
 # binary.finetune()
 #binary.read_stat()
 tfmodel = TfRnnModel()
-tfmodel.test_keras()
+tfmodel.set_epoch(70)
+tfmodel.test_double_rnn_keras()
