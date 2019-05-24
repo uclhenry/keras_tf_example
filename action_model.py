@@ -621,9 +621,9 @@ class MultiClassModel(ActionModel):
 
     def default_config(self):
         self.model = None
-        self.hidden_size = 250
+        self.hidden_size = 200
         self.input_shape = (59,)
-        self.batch_size = 100
+        self.batch_size = 400
         self.num_epochs = 50
         self.X_feature_number = 9
         self.model_path = "D://model//policy_learner_kvret_new.h5"
@@ -1098,6 +1098,38 @@ class TfRnnModel(MultiClassModel):
 
     def reduce_mean(self,X):
         return K.mean(X, axis=-1)
+
+    def tf_train(self,x,y,his_train,his_test ,ytrain, ytest,train_op,accuracy):
+
+        #his_train, his_test, ytrain, ytest
+        data = [[y,x] for y,x in zip(ytrain,his_train)]
+        with tf.Session() as sess:
+            # tf.initialize_all_variables() no long valid from
+            # 2017-03-02 if using tensorflow >= 0.12
+            if int((tf.__version__).split('.')[1]) < 12 and int((tf.__version__).split('.')[0]) < 1:
+                init = tf.initialize_all_variables()
+            else:
+                init = tf.global_variables_initializer()
+            sess.run(init)
+            step = 0
+            time = 0
+            training_iters = len(ytrain)#((step + 2) * self.batch_size) < training_iters
+            max_step  =int(training_iters/self.batch_size)
+            while time <800:
+                # print('{},{},{},{}'.format(step,batch_size,training_iters,(step+1) * batch_size ))
+                batch_xs, batch_ys = self.get_batch(data, step, self.batch_size)
+                sess.run([train_op], feed_dict={
+                    x: batch_xs,
+                    y: batch_ys,
+                })
+                if time % 8 == 0 or time >790:
+                    print(time  // (max_step-2))
+                    print((time) * self.batch_size, sess.run(accuracy, feed_dict={
+                        x: his_test[-self.batch_size:],
+                        y: ytest[-self.batch_size:],
+                    }))
+                step = (step + 1)% (max_step-2)
+                time +=1
     def build_model(self):
         # set random seed for comparing the two result calculations
         lr, weights,biases,x, W, y = self.get_var()
@@ -1117,31 +1149,74 @@ class TfRnnModel(MultiClassModel):
             data.append([Y[i],his_data_array[i]])
 
         #data = zip(Y,history_utterances)
-        with tf.Session() as sess:
-            # tf.initialize_all_variables() no long valid from
-            # 2017-03-02 if using tensorflow >= 0.12
-            if int((tf.__version__).split('.')[1]) < 12 and int((tf.__version__).split('.')[0]) < 1:
-                init = tf.initialize_all_variables()
-            else:
-                init = tf.global_variables_initializer()
-            sess.run(init)
-            step = 0
-            training_iters = len(Y)
-            while ((step + 2) * self.batch_size) < training_iters:
-                # print('{},{},{},{}'.format(step,batch_size,training_iters,(step+1) * batch_size ))
-                batch_xs, batch_ys = self.get_batch(data, step, self.batch_size)
-                batch_xs2, batch_ys2 = self.get_batch(data, step + 1, self.batch_size)
-                sess.run([train_op], feed_dict={
-                    x: batch_xs,
-                    y: batch_ys,
-                })
-                if step % 2 == 0:
-                    print((step) * self.batch_size, sess.run(accuracy, feed_dict={
-                        x: batch_xs2,
-                        y: batch_ys2,
-                    }))
-                step += 1
 
+    def double_rnn_tf(self):
+        X, Y, history_utterances = self.load_data_from_pk()
+        self.build_counter(history_utterances)
+        Y = np.array(Y)
+        his_data_array = self.get_utterance(history_utterances)
+        data = []
+        for i in range(len(Y)):
+            data.append([Y[i],his_data_array[i]])
+
+
+
+
+
+        lr, weights,biases,x, W, y = self.get_var()
+        embedded_chars = tf.nn.embedding_lookup(W, x)
+        # ?,160,embedding
+        add_dim = tf.reshape(embedded_chars,(-1,self.turn_number,self.MAX_SENTENCE_LENGTH,self.embedding_size))
+        #(?,4,40,200)
+        #trans = tf.transpose(add_dim, perm=[0, ])
+        turn = dict()
+        # basic LSTM Cell.
+        if int((tf.__version__).split('.')[1]) < 12 and int((tf.__version__).split('.')[0]) < 1:
+            cell = tf.nn.rnn_cell.BasicLSTMCell(self.hidden_size, forget_bias=1.0, state_is_tuple=True,name='word_RNN')
+        else:
+            cell = tf.contrib.rnn.BasicLSTMCell(self.hidden_size,name='word_RNN')
+        for i in range(4):
+            turn[i] = add_dim[:,i,:,:]
+            turn[i] = tf.reshape(turn[i],(-1,self.MAX_SENTENCE_LENGTH,self.embedding_size))
+            init_state = cell.zero_state(self.batch_size, dtype=tf.float32)
+            outputs, final_state = tf.nn.dynamic_rnn(cell, turn[i], initial_state=init_state, time_major=False)
+            tp = tf.transpose(outputs, [1, 0, 2])
+            if int((tf.__version__).split('.')[1]) < 12 and int((tf.__version__).split('.')[0]) < 1:
+                outputs = tf.unpack(tp)  # states is the last outputs
+            else:
+                outputs = tf.unstack(tp)
+            turn[i] = outputs[-1]#
+
+        for t in range(4):
+            turn[t] =  tf.reshape(turn[t],(-1,1,self.hidden_size))
+        turns = tf.concat([turn[0], turn[1],turn[2],turn[3]],axis=1)
+        # basic LSTM Cell.
+        with tf.variable_scope('sentence_RNN'):
+            if int((tf.__version__).split('.')[1]) < 12 and int((tf.__version__).split('.')[0]) < 1:
+                cell = tf.nn.rnn_cell.BasicLSTMCell(self.hidden_size, forget_bias=1.0, state_is_tuple=True,name='sentence_RNN')
+            else:
+                cell = tf.contrib.rnn.BasicLSTMCell(self.hidden_size,name='sentence_RNN')
+            # lstm cell is divided into two parts (c_state, h_state)
+            init_state = cell.zero_state(self.batch_size, dtype=tf.float32)
+            outputs, final_state = tf.nn.dynamic_rnn(cell, turns, initial_state=init_state, time_major=False)
+            tp = tf.transpose(outputs, [1, 0, 2])
+            if int((tf.__version__).split('.')[1]) < 12 and int((tf.__version__).split('.')[0]) < 1:
+                outputs = tf.unpack(tp)  # states is the last outputs
+            else:
+                outputs = tf.unstack(tp)
+            rnn_output = outputs[-1]  #
+        pred = tf.matmul(rnn_output, weights['out']) + biases['out']  # shape = (128, 10)
+        cost = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=pred, labels=y))
+        train_op = tf.train.AdamOptimizer(lr).minimize(cost)
+        correct_pred = tf.equal(tf.argmax(pred, 1), tf.argmax(y, 1))
+        accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32))
+
+
+        his_train,his_test ,ytrain, ytest = train_test_split(his_data_array, Y, test_size=0.1,
+                                                        random_state=42)
+        self.tf_train(x,y,his_train,his_test ,ytrain, ytest,train_op,accuracy)
+
+        #return pred,train_op,cost,correct_pred,accuracy
     def test_double_rnn_keras(self):
         n_class  = len(self.all_action)
         X, Y, history_utterances = self.load_data_from_pk()
@@ -1269,6 +1344,8 @@ class TfRnnModel(MultiClassModel):
 # #binary.load_data_and_train()
 # binary.finetune()
 #binary.read_stat()
+
 tfmodel = TfRnnModel()
-tfmodel.set_epoch(70)
-tfmodel.test_double_rnn_keras()
+tfmodel.double_rnn_tf()
+# tfmodel.set_epoch(70)
+# tfmodel.test_double_rnn_keras()
