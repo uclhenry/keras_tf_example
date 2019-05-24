@@ -40,12 +40,87 @@ class ActionModel():
         self.loss_d = {k: 'binary_crossentropy' for k in self.all_action}
         self.lossweight_d = {k: 1. for k in self.all_action}
         self.set_slot()
+    def set_verbose(self,verbose):
+        self.verbose = verbose
+    def reduce_mean(self,X):
+        return K.mean(X, axis=-1)
+
+    def fix_length_vector(self,v,n):
+        if len(v)>n:
+            return v[:n]
+        else:
+            return [0]*(n - len(v)) + v
+    def words2seq(self,words,word2index):
+        seqs = []
+        for word in words:
+            if word in word2index.keys():
+                seqs.append(word2index[word])
+            else:
+                seqs.append(word2index["UNK"])
+        return seqs
+    def get_action_label_dict(self,Y):
+        # Y is list
+        y_dict = dict()
+        for action in self.all_action:
+            y_dict[action] = []
+            for labels in Y:
+                if action in labels:
+                    y_dict[action].append(1)
+                else:
+                    y_dict[action].append(0)
+        return y_dict
+
+    def build_counter(self,history):
+
+        word_freqs = collections.Counter()
+        maxlen = 0
+        for his in history:
+            last_utterance = his[-1]
+            words = nltk.word_tokenize(last_utterance.lower())
+            if len(words) > maxlen:
+                maxlen = len(words)
+            for word in words:
+                word_freqs[word] += 1
+        vocab_size = min(self.MAX_FEATURES, len(word_freqs)) + 2
+        print('vocab size is {}'.format(vocab_size))
+        word2index = {x[0]: i + 2 for i, x in enumerate(word_freqs.most_common(self.MAX_FEATURES))}
+        word2index["PAD"] = 0
+        word2index["UNK"] = 1
+        self.word2index = word2index
+        self.index2word = {v: k for k, v in word2index.items()}
+
+    # glove字典，每个单词对应一个100维的向量
+    def get_glove_dict(self):
+        embeddings_index = {}
+        #f = open(os.path.join(glove_dir, 'glove.6B.100d.txt'))
+        f = open('D://udc//data//glove.6B.100d.txt',encoding='utf-8')
+        for line in f:
+            values = line.split()
+            word = values[0]
+            coefs = np.asarray(values[1:], dtype='float32')
+            embeddings_index[word] = coefs
+        f.close()
+        print('Found %s word vectors.' % len(embeddings_index))
+        return embeddings_index
+
+    def get_embed_matrix(self,word_index,EMBEDDING_DIM):
+        GLOVE_DIR = 'text_data/glove.6B'
+
+        embedding_matrix = np.zeros((len(word_index) + 1, EMBEDDING_DIM))
+        embedding_index = self.get_glove_dict()
+        for word, i in word_index.items():
+            embedding_vector = embedding_index.get(word)
+            if embedding_vector is not None:
+                # words not found in embedding index will be all-zeros.
+                embedding_matrix[i] = embedding_vector
+        return embedding_matrix
 
     def set_epoch(self,n):
         self.num_epoch = n
 
 
     def default_config(self):
+        self.verbose = 0
         self.model = None
         self.hidden_size = 300
         self.input_shape = (9,)
@@ -107,7 +182,7 @@ class ActionModel():
         # Split input into training and test
         Xtrain, Xtest, ytrain, ytest = train_test_split(X, Y, test_size=0.2,
                                                         random_state=42)
-        self.model.fit(Xtrain, ytrain, batch_size=self.batch_size,verbose = 0,
+        self.model.fit(Xtrain, ytrain, batch_size=self.batch_size,verbose = self.verbose,
                   epochs=self.num_epochs,
                   validation_data=(Xtest, ytest))
         return Xtrain, Xtest, ytrain, ytest
@@ -119,7 +194,7 @@ class ActionModel():
                                                         random_state=42)
         ytrain = self.get_multi_labels(ytrain)
         ytest = self.get_multi_labels(ytest)
-        self.model.fit(Xtrain, ytrain, batch_size=self.batch_size,verbose=2,
+        self.model.fit(Xtrain, ytrain, batch_size=self.batch_size,verbose=self.verbose,
                   epochs=self.num_epochs,
                   validation_data=(Xtest, ytest))
 
@@ -279,6 +354,9 @@ class ActionModel():
 
 
 class BinaryModel(ActionModel):
+
+
+
     def load_models(self):
         models = dict()
         for action in self.all_action:
@@ -350,8 +428,8 @@ class BinaryModel(ActionModel):
 
         return  stat_d
     def load_data_and_train(self):
-        X,Y,data,state_his_s= get_X_Y_from_raw_text()
-        states = slot_state_dict(informable, requestable)
+        X,Y,data,state_his_s,labels,uss= get_X_Y_from_raw_text()
+
         data = [d for d in data if d[1]!=  []]
         Y = [d[1] for d in data]
         X = [d[0] for d in data]
@@ -365,7 +443,7 @@ class BinaryModel(ActionModel):
                     y_dict[action].append(0)
         self.build_binary_model()
         self.binary_train(X,y_dict)
-        self.show_report(self, self.stat_d)
+        self.show_report(self.stat_d)
 
     def get_next_action_from_slots(self,slots):
         x = self.get_feature_from_slots(slots,self.informable, self.requestable)
@@ -378,11 +456,14 @@ class BinaryModel(ActionModel):
             multi_action_prop_dict[action] = float(prop)
         return self.get_best_action(multi_action_prop_dict)
 
+
 class RnnBinaryModel(BinaryModel):
+
     def default_config(self):
         self.model = None
         self.hidden_size = 100
         self.rnn_hidden_size = 1
+
         self.config()
         self.X_feature_number = 9
         self.input_shape = (self.turn_num,self.X_feature_number)
@@ -401,6 +482,19 @@ class RnnBinaryModel(BinaryModel):
         self.hidden_size_range = range(10,150,15)
         self.rnn_size_range = range(10,150,15)
 
+    def history_padding(self,state_his_s,feature_number):
+        new_data = []
+        for state_his in state_his_s:
+            if len(state_his) < self.turn_num:
+                d = self.turn_num - len(state_his)
+                left_pad = [[0] * feature_number for i in range(d)]
+                left_pad.extend(state_his)
+                new_data.append(left_pad)
+            elif len(state_his) == self.turn_num:
+                new_data.append(state_his)
+            else:
+                new_data.append(state_his[-self.turn_num:])
+        return new_data
 
     def config(self):
         self.turn_num = 3
@@ -443,53 +537,22 @@ class RnnBinaryModel(BinaryModel):
         data = [d for d in zip(new_data,labels) if d[1]!=  []]
         Y = [d[1] for d in data]
         X = [d[0] for d in data]
-        y_dict = dict()
-        for action in self.all_action:
-            y_dict[action] = []
-            for labels in Y:
-                if action in labels:
-                    y_dict[action].append(1)
-                else:
-                    y_dict[action].append(0)
+        y_dict = self.get_action_label_dict(Y)
         self.build_binary_model()
         stat_d = self.binary_train(X,y_dict)
         self.show_report(stat_d)
 
-    def history_padding(self,state_his_s):
-        new_data = []
-        for state_his in state_his_s:
 
-            if len(state_his) < self.turn_num:
-                d = self.turn_num - len(state_his)
-                left_pad = [[0] * self.X_feature_number for i in range(d)]
-                left_pad.extend(state_his)
-                new_data.append(left_pad)
-            elif len(state_his) == self.turn_num:
-                new_data.append(state_his)
-            else:
-                new_data.append(state_his[-self.turn_num:])
-        return new_data
 
-    def get_action_label_dict(self,Y):
-        # Y is list
-        y_dict = dict()
-        for action in self.all_action:
-            y_dict[action] = []
-            for labels in Y:
-                if action in labels:
-                    y_dict[action].append(1)
-                else:
-                    y_dict[action].append(0)
-        return y_dict
 
-    def finetune(self):
+    def finetune(self,n):
         import pickle
-        n = 2
+        #n = 2
         # openfile = open('f1_turn{}.pk'.format(n),'rb')
 
 
         all_statistic = []
-        X,Y,data,state_his_s,labels= get_X_Y_from_raw_text()
+        X,Y,data,state_his_s,labels,uss= get_X_Y_from_raw_text()
         #turn_d = dict()
         # turn_d =pickle.load(openfile)
         # openfile.close()
@@ -515,7 +578,7 @@ class RnnBinaryModel(BinaryModel):
 
 
             self.turn_num = turn_n
-            new_data = self.history_padding(state_his_s)
+            new_data = self.history_padding(state_his_s,self.X_feature_number)
             data = [d for d in zip(new_data,labels) if d[1] !=  []]
             Y = [d[1] for d in data]
             X = [d[0] for d in data]
@@ -562,20 +625,25 @@ class RnnBinaryModel(BinaryModel):
 
 
 
-    def draw(self,data,action):
+    def draw(self,data,action,n):
         import seaborn as sns
         import pandas as pd
         import matplotlib.pyplot as plt
         sns.set()
         data = pd.DataFrame(data,columns=self.rnn_size_range,index=self.hidden_size_range)
-        ax = sns.heatmap(data)
+        ax = sns.heatmap(data,annot=True)
+        plt.xlabel('rnn hidden unit')
+        plt.ylabel('dense hidden unit')
+        # 添加标题
+        plt.title('heatmap turn:{} ,for {} ')
+        plt.savefig('turn{}_action{}.png'.format(str(n),action), dpi=300)
         plt.show()
 
-    def read_stat(self):
+    def read_stat(self,n):
         # file = open('f1_turn3.pk', 'rb')
         # import pickle
         # turn_d = pickle.load(file)
-        n = 3
+
         text_file = open('f1_turn{}.txt'.format(n), 'r')
         lines = text_file.readlines()
         text_file.close()
@@ -604,12 +672,124 @@ class RnnBinaryModel(BinaryModel):
             # action_arr = [u[-1][action] for u in cur]
             # action_arr_extend = [[u[0],u[1],u[-1][action]] for u in cur]
             data = np.array(action_dict[action]).reshape((len(self.hidden_size_range),len(self.rnn_size_range)))
-            self.draw(data,action)
+            self.draw(data,action,n)
 
 
+class DuelRnnCamRest(RnnBinaryModel):
+    def get_utterance(self,history):
+        self.build_counter(history)
+        maxlen = 0
+        print('get_w2i')
+        his_data = []
+        his_i = 0
+        for turn in history:
+            turn_vector = []
+            for utterance in turn:
+                words = nltk.word_tokenize(utterance.lower())
+                seqs = self.words2seq(words,self.word2index)
+                if len(seqs) > self.MAX_SENTENCE_LENGTH:
+                    seqs = seqs[: self.MAX_SENTENCE_LENGTH]
+                else:
+                    seqs = [0] * ( self.MAX_SENTENCE_LENGTH - len(seqs)) + seqs
+            turn_vector += seqs
+            turn_vector = self.fix_length_vector(turn_vector,  self.MAX_SENTENCE_LENGTH * self.turn_number)
+            his_data.append(turn_vector)
+            his_i += 1
+        his_data_array = np.array(his_data)
+        # his = his.reshape((-1,self.turn_number* self.MAX_SENTENCE_LENGTH,))
+        # Split input into training and test
+        print('finish word 2 index')
+        return his_data_array
+    def default_config(self):
+        self.MAX_FEATURES = 1200
+        self.model = None
+        self.hidden_size = 300
+        self.turn_number = 3
+        self.turn_num = 3
+        self.MAX_SENTENCE_LENGTH = 40
+        self.vocab_size, self.embedding_size = 1000, 100
+        self.input_shape = (9,)
+        self.batch_size = 200
+        self.num_epochs = 15
+        self.X_feature_number = 9
+        self.model_path = "D://model/policy_learner_single.h5"
+        more_actions = ['action_goodbye', 'action_morehelp', 'action_inform_address', \
+                        'action_inform_food', 'action_inform_phone', \
+                        'action_inform_area', 'action_inform_postcode', 'action_search_rest']
+        self.all_action = more_actions
+        self.set_slot()
+        self.allow_action = self.all_action
 
+    def build_binary_model(self):
+        n_class = len(self.all_action)
+        X, Y, data, state_his_s, labels, history_utterances = get_X_Y_from_raw_text()
+        self.build_counter(history_utterances)
+        use_pretrain = True
+        word_index = self.word2index
+        EMBEDDING_DIM = 100
+        # x_utterance_concat = Input(shape =(self.MAX_SENTENCE_LENGTH * self.turn_number,), name="concat_utter")
+        #### old impliment
+        x_utterance_concat = Input(shape=(self.turn_number * self.MAX_SENTENCE_LENGTH,), name="concat_utter")
+        if use_pretrain:
+            embedding_matrix = self.get_embed_matrix(word_index, EMBEDDING_DIM)
+            pretrain_embedding = Embedding(len(word_index) + 1,
+                                           EMBEDDING_DIM,
+                                           weights=[embedding_matrix],
+                                           input_length=self.MAX_SENTENCE_LENGTH * self.turn_number,
+                                           trainable=False)
+            x_embed = pretrain_embedding(x_utterance_concat)
 
+        else:
+            x_embed = Embedding(self.vocab_size, self.embedding_size,
+                                input_length=self.MAX_SENTENCE_LENGTH * self.turn_number)(x_utterance_concat)
+        inputs_drop = SpatialDropout1D(0.2)(x_embed)
+        word_level_rnn = Bidirectional(
+            LSTM(self.hidden_size, dropout=0.1, recurrent_dropout=0.1, name='RNN',
+                 return_sequences=True))(inputs_drop)
+        rnn1_shape = Reshape((self.turn_number, self.MAX_SENTENCE_LENGTH, self.hidden_size * 2))(word_level_rnn)
+        swap = Permute((1, 3, 2))(rnn1_shape)
+        average = Lambda(self.reduce_mean)(swap)
+        sentence_level_rnn = Bidirectional(
+            LSTM(self.hidden_size, dropout=0.1, recurrent_dropout=0.1, name='RNN',
+                 return_sequences=False))(average)
 
+        binary = Dense(1, activation='sigmoid')(sentence_level_rnn)
+        model = Model(inputs=x_utterance_concat, outputs=binary)
+        model.compile(optimizer="adam",
+                      loss='binary_crossentropy',
+                      metrics=['accuracy'])
+        self.model = model
+        return model
+
+    def binary_train(self, X, y_dict):
+        stat_d = dict()
+        for action in self.all_action:
+            print('training ', action)
+            X_, Y_ = self.downsample(X, y_dict[action])
+            Xtrain, Xtest, ytrain, ytest = self.train_single_action(X_, Y_)
+            y_hat = self.model.predict_on_batch(Xtest)
+            y_hat = [y[0] for y in y_hat.tolist()]
+            to_int = lambda x: 1 if x > 0.5 else 0
+            y_hat = [to_int(y) for y in y_hat]
+            stat = classification_report(ytest, y_hat)
+            stat_d[action] = stat
+            dir = self.model_path.split('.')[0]
+            path = dir + action + '.' + self.model_path.split('.')[-1]
+            self.save(path)
+        return stat_d
+
+    def load_data_and_train(self):
+        X, Y, data, state_his_s, labels, uss = get_X_Y_from_raw_text()
+        his_data_array = self.get_utterance(uss)
+        #new_data = self.history_padding(uss, self.MAX_SENTENCE_LENGTH)
+        data = [d for d in zip(his_data_array, labels) if d[1] != []]
+        Y = [d[1] for d in data]
+        X = [d[0] for d in data]
+
+        y_dict = self.get_action_label_dict( Y)
+        self.build_binary_model()
+        stat_d = self.binary_train(X, y_dict)
+        self.show_report(stat_d)
 
 
 class MultiClassModel(ActionModel):
@@ -621,7 +801,7 @@ class MultiClassModel(ActionModel):
 
     def default_config(self):
         self.model = None
-        self.hidden_size = 200
+        self.hidden_size = 220
         self.input_shape = (59,)
         self.batch_size = 400
         self.num_epochs = 50
@@ -646,7 +826,30 @@ class MultiClassModel(ActionModel):
         self.set_index_dict()
 
 
-
+    def get_utterance(self,history):
+        self.build_counter(history)
+        maxlen = 0
+        print('get_w2i')
+        his_data = []
+        his_i = 0
+        for turn in history:
+            turn_vector = []
+            for utterance in turn:
+                words = nltk.word_tokenize(utterance.lower())
+                seqs = self.words2seq(words,self.word2index)
+                if len(seqs) > self.MAX_SENTENCE_LENGTH:
+                    seqs = seqs[: self.MAX_SENTENCE_LENGTH]
+                else:
+                    seqs = [0] * ( self.MAX_SENTENCE_LENGTH - len(seqs)) + seqs
+            turn_vector += seqs
+            turn_vector = self.fix_length_vector(turn_vector,  self.MAX_SENTENCE_LENGTH * self.turn_number)
+            his_data.append(turn_vector)
+            his_i += 1
+        his_data_array = np.array(his_data)
+        # his = his.reshape((-1,self.turn_number* self.MAX_SENTENCE_LENGTH,))
+        # Split input into training and test
+        print('finish word 2 index')
+        return his_data_array
 
     def build_model(self):
         x = Input(shape = self.input_shape, name="input")
@@ -858,12 +1061,6 @@ class MultiClassModel(ActionModel):
                                                         random_state=42)
         self.evaluate([Xtest,his_test],ytest)
 
-    def fix_length_vector(self,v,n):
-        if len(v)>n:
-            return v[:n]
-        else:
-            return [0]*(n - len(v)) + v
-
 
     def words2seq(self,words,word2index):
         seqs = []
@@ -873,6 +1070,8 @@ class MultiClassModel(ActionModel):
             else:
                 seqs.append(word2index["UNK"])
         return seqs
+
+
 
     def get_text(self,history):
         r = []
@@ -918,29 +1117,7 @@ class MultiClassModel(ActionModel):
         self.index2word = {v: k for k, v in word2index.items()}
 
 
-    def get_utterance(self,history):
-        self.build_counter(history)
-        maxlen = 0
-        print('get_w2i')
-        his_data = []
-        his_i = 0
-        for turn in history:
-            turn_vector = []
-            for utterance in turn:
-                words = nltk.word_tokenize(utterance.lower())
-                seqs = self.words2seq(words,self.word2index)
-                if len(seqs) > self.MAX_SENTENCE_LENGTH:
-                    seqs = seqs[: self.MAX_SENTENCE_LENGTH]
-                else:
-                    seqs = [0] * ( self.MAX_SENTENCE_LENGTH - len(seqs)) + seqs
-            turn_vector += seqs
-            turn_vector = self.fix_length_vector(turn_vector,  self.MAX_SENTENCE_LENGTH * self.turn_number)
-            his_data.append(turn_vector)
-            his_i += 1
-        his_data_array = np.array(his_data)
-        # his = his.reshape((-1,self.turn_number* self.MAX_SENTENCE_LENGTH,))
-        # Split input into training and test
-        return his_data_array
+
 
     def train(self,X,history,Y):
         X = np.array(X, )  # .reshape((-1,59))
@@ -952,7 +1129,7 @@ class MultiClassModel(ActionModel):
         Xtrain, Xtest,his_train,his_test ,ytrain, ytest = train_test_split(X,his_data_array, Y, test_size=0.1,
                                                         random_state=42)
 
-        self.model.fit([Xtrain,his_train], ytrain, batch_size=self.batch_size,verbose=2,
+        self.model.fit([Xtrain,his_train], ytrain, batch_size=self.batch_size,verbose=self.verbose,
                   epochs=self.num_epochs,
                   validation_data=([Xtest,his_test], ytest))
         self.evaluate([Xtest,his_test],ytest)
@@ -966,7 +1143,7 @@ class MultiClassModel(ActionModel):
                                                         random_state=42)
         self.model.fit(his_train, ytrain, batch_size=self.batch_size,
                   epochs=self.num_epochs,
-                  validation_data=(his_test, ytest),verbose=2)
+                  validation_data=(his_test, ytest),verbose=self.verbose)
         self.evaluate(his_test,ytest)
 
     # def train(self,X,Y):
@@ -1278,7 +1455,7 @@ class TfRnnModel(MultiClassModel):
         self.model = model
         self.model.fit(his_train, ytrain, batch_size=self.batch_size,
                   epochs=self.num_epochs,
-                  validation_data=(his_test, ytest),verbose=2)
+                  validation_data=(his_test, ytest),verbose=self.verbose)
         self.evaluate(his_test,ytest)
 
     def test_keras(self):
@@ -1332,7 +1509,7 @@ class TfRnnModel(MultiClassModel):
         self.model = model
         self.model.fit(his_train, ytrain, batch_size=self.batch_size,
                        epochs=self.num_epochs,
-                       validation_data=(his_test, ytest), verbose=2)
+                       validation_data=(his_test, ytest), verbose=self.verbose)
         self.evaluate(his_test, ytest)
 # m = MultiClassModel()
 # m.load_data_and_train()
@@ -1342,10 +1519,15 @@ class TfRnnModel(MultiClassModel):
 # m.load_data_and_train()
 # binary = RnnBinaryModel()
 # #binary.load_data_and_train()
-# binary.finetune()
-#binary.read_stat()
+# binary.finetune(4)
+#binary.read_stat(2)
+#binary.read_stat(3)
 
-tfmodel = TfRnnModel()
-tfmodel.double_rnn_tf()
+# tfmodel = TfRnnModel()
+# tfmodel.double_rnn_tf()
 # tfmodel.set_epoch(70)
 # tfmodel.test_double_rnn_keras()
+
+duelrnn = DuelRnnCamRest()
+duelrnn.set_verbose(2)
+duelrnn.load_data_and_train()
